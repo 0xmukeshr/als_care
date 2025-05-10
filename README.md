@@ -21,20 +21,14 @@ An intelligent information crawler and RAG (Retrieval-Augmented Generation) agen
 
 ## Installation
 
-1. Clone the repository:
-```bash
-git clone https://github.com/coleam00/ottomator-agents.git
-cd ottomator-agents/crawl4AI-agent
-```
-
-2. Install dependencies (recommended to use a Python virtual environment):
+1. Install dependencies (recommended to use a Python virtual environment):
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables:
+2. Set up environment variables:
    - Rename `.env.example` to `.env`
    - Edit `.env` with your API keys and preferences:
    ```env
