@@ -1,4 +1,4 @@
-# Pydantic AI: information Crawler and RAG Agent
+#ALS Cargiving assist AI
 
 An intelligent information crawler and RAG (Retrieval-Augmented Generation) agent built using Pydantic AI and Supabase. The agent can crawl information websites, store content in a vector database, and provide intelligent answers to user questions by retrieving and analyzing relevant information chunks.
 
