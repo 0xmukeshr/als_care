@@ -110,9 +110,6 @@ The chunker intelligently preserves:
 - `site_page.sql`: Database setup commands
 - `requirements.txt`: Project dependencies
 
-## Live Agent Studio Version
-
-If you're interested in seeing how this agent is implemented in the Live Agent Studio, check out the `studio-integration-api` directory. This contains the API endpoint for the production version of the agent that runs on the platform.
 
 ## Error Handling
 
