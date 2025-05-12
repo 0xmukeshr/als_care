@@ -1,76 +1,92 @@
-import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
 import { Scraper, SearchMode } from 'agent-twitter-client';
 import { Cookie } from 'tough-cookie';
-import dotenv from 'dotenv';
-import fs from 'fs/promises';
-import path from 'path';
-import { existsSync } from 'fs';
+import * as dotenv from 'dotenv';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { fileURLToPath } from 'url';
 
 // Load environment variables from .env file
 dotenv.config();
 
-// Create a new Hono app
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Configure server port
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+
+// Create Hono app
 const app = new Hono();
 
-// Define port for the server
-const PORT = process.env.PORT || 3000;
+const COOKIES_FILE = path.join(__dirname, 'twitter-cookies.json');
+const PROCESSED_TWEETS_FILE = path.join(__dirname, 'processed-tweets.json');
 
-// Store found tweets to avoid duplicates and track processing status
-const processedTweets = new Set();
-const pendingTweets = {};
+// Keyword to search for
+const SEARCH_KEYWORD = '@0xkeyaru';
 
-// In-memory response storage instead of using files
-const botResponses = {};
+// In-memory storage to replace file-based I/O
+interface TweetData {
+  id: string;
+  username: string;
+  content: string;
+  timestamp: number;
+  processed: boolean;
+  response?: string;
+}
 
-// Store cookies in memory
-let twitterCookies = [];
-
-// Path to the cookies file
-const COOKIES_FILE_PATH = path.join(process.cwd(), './cookies.json');
+// In-memory storage
+const tweetStore: Map<string, TweetData> = new Map();
+let currentActiveTweet: TweetData | null = null;
+// Set to keep track of processed tweet IDs
+const processedTweetIds: Set<string> = new Set();
 
 /**
- * Try to load cookies from file
- * @returns Array of loaded cookies or empty array if failed
+ * Load processed tweet IDs from file
  */
-async function loadCookiesFromFile() {
+function loadProcessedTweets(): void {
   try {
-    console.log(`Attempting to load cookies from ${COOKIES_FILE_PATH}`);
-    const fileExists = await fs.access(COOKIES_FILE_PATH)
-      .then(() => true)
-      .catch(() => false);
-    
-    if (!fileExists) {
-      console.log('Cookies file not found');
-      return [];
+    if (fs.existsSync(PROCESSED_TWEETS_FILE)) {
+      const data = fs.readFileSync(PROCESSED_TWEETS_FILE, 'utf8');
+      const ids = JSON.parse(data);
+      
+      if (Array.isArray(ids)) {
+        ids.forEach(id => processedTweetIds.add(id));
+        console.log(`Loaded ${processedTweetIds.size} processed tweet IDs from file`);
+      }
     }
-    
-    const cookiesData = await fs.readFile(COOKIES_FILE_PATH, 'utf-8');
-    const cookiesJson = JSON.parse(cookiesData);
-    const cookies = cookiesJson.map(cookieJson => Cookie.fromJSON(cookieJson)).filter((cookie): cookie is Cookie => cookie !== null);
-
-    console.log(`Loaded ${cookies.length} cookies from file`);
-    
-    return cookies;
   } catch (error) {
-    console.error('Error loading cookies from file:', error);
-    return [];
+    console.error('Error loading processed tweets:', error);
+    // Continue with empty set if file doesn't exist or is invalid
   }
 }
 
 /**
- * Save Twitter cookies to memory and file
+ * Save processed tweet IDs to file
+ */
+function saveProcessedTweets(): void {
+  try {
+    const ids = Array.from(processedTweetIds);
+    fs.writeFileSync(PROCESSED_TWEETS_FILE, JSON.stringify(ids, null, 2));
+    console.log(`Saved ${ids.length} processed tweet IDs to file`);
+  } catch (error) {
+    console.error('Error saving processed tweets:', error);
+  }
+}
+
+/**
+ * Save Twitter cookies to a file
  * @param scraper The scraper instance to get cookies from
  */
-async function saveCookies(scraper) {
+async function saveCookies(scraper: Scraper): Promise<void> {
   try {
     // Get cookies directly from the scraper
-    twitterCookies = await scraper.getCookies();
-    console.log('Cookies saved successfully to memory');
+    const cookies = await scraper.getCookies();
     
-    // Also save to file for persistence
-    await fs.writeFile(COOKIES_FILE_PATH, JSON.stringify(twitterCookies, null, 2));
-    console.log(`Cookies saved to ${COOKIES_FILE_PATH}`);
+    // Save them as serializable objects
+    const serializedCookies = cookies.map(cookie => cookie.toJSON());
+    fs.writeFileSync(COOKIES_FILE, JSON.stringify(serializedCookies, null, 2));
+    console.log('Cookies saved successfully');
   } catch (error) {
     console.error('Error saving cookies:', error);
   }
@@ -83,13 +99,13 @@ async function saveCookies(scraper) {
  */
 async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
   try {
-    if (!existsSync(COOKIES_FILE_PATH)) {
+    if (!fs.existsSync(COOKIES_FILE)) {
       console.log('No saved cookies found');
       return false;
     }
     
-    const cookiesData = await fs.readFile(COOKIES_FILE_PATH, 'utf8');
-    const cookiesJson = await JSON.parse(cookiesData);
+    const cookiesData = fs.readFileSync(COOKIES_FILE, 'utf8');
+    const cookiesJson = JSON.parse(cookiesData);
     
     if (!Array.isArray(cookiesJson) || cookiesJson.length === 0) {
       console.log('Invalid cookie data, will login with credentials');
@@ -100,7 +116,8 @@ async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
     
     // Convert JSON objects back to Cookie objects
     try {
-      const cookies = await cookiesJson.map(cookieJson => Cookie.fromJSON(cookieJson)).filter((cookie): cookie is Cookie => cookie !== null);
+      const cookies = cookiesJson.map(cookieJson => Cookie.fromJSON(cookieJson)).filter((cookie): cookie is Cookie => cookie !== null);
+      
       await scraper.setCookies(cookies);
     } catch (error) {
       console.log('Error setting cookies:', error);
@@ -124,12 +141,13 @@ async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
     return false;
   }
 }
+
 /**
  * Authenticate with Twitter using username/password
  * @param scraper Twitter scraper instance
  * @returns Whether authentication was successful
  */
-async function loginWithCredentials(scraper) {
+async function loginWithCredentials(scraper: Scraper): Promise<boolean> {
   // Get authentication details from environment variables
   const username = process.env.TWITTER_USERNAME;
   const password = process.env.TWITTER_PASSWORD;
@@ -137,8 +155,7 @@ async function loginWithCredentials(scraper) {
   const twoFactorSecret = process.env.TWITTER_2FA_SECRET; // Optional
 
   if (!username || !password) {
-    console.warn('Twitter credentials not found in environment variables');
-    return false; // Changed to return false instead of throwing error
+    throw new Error('Twitter credentials not found in environment variables');
   }
 
   try {
@@ -171,55 +188,49 @@ async function loginWithCredentials(scraper) {
 /**
  * Search for the latest tweet with specific keyword
  * @param scraper Authenticated Twitter scraper
- * @param keyword Keyword to search for
  * @returns The latest tweet found or null
  */
-async function searchForLatestTweet(scraper, keyword) {
+async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null> {
   try {
-    console.log(`Searching for tweets containing "${keyword}"...`);
+    console.log(`Searching for tweets containing "${SEARCH_KEYWORD}"...`);
     
     // Set to get only the latest tweet
-    const maxTweets = 1;
-    let latestTweet = null;
+    const maxTweets = 10; // Increased to find more potential new tweets
     
     console.log(`Starting search with mode: ${SearchMode.Latest} (${SearchMode[SearchMode.Latest]})`);
     
     // Use fetchSearchTweets for more direct control
-    const response = await scraper.fetchSearchTweets(keyword, maxTweets, SearchMode.Latest);
-    console.log("RESPONSE FROM TWITTER",response)
-    // Get the most recent tweet that contains our keyword
+    const response = await scraper.fetchSearchTweets(SEARCH_KEYWORD, maxTweets, SearchMode.Latest);
+    
+    // Get the most recent tweet that contains our keyword and hasn't been processed
     for (const tweet of response.tweets) {
       if (tweet.id && tweet.username && tweet.text && 
-          tweet.text.toLowerCase().includes(keyword.toLowerCase()) &&
-          !processedTweets.has(tweet.id)) {
+          tweet.text.toLowerCase().includes(SEARCH_KEYWORD.toLowerCase()) &&
+          !processedTweetIds.has(tweet.id)) {
         
-        console.log(`Found tweet by @${tweet.username}: "${tweet.text?.substring(0, 50)}..."`);
+        console.log(`Found new tweet by @${tweet.username}: "${tweet.text?.substring(0, 50)}..."`);
         
-        latestTweet = {
+        const tweetData: TweetData = {
+          id: tweet.id,
           username: tweet.username,
           content: tweet.text,
-          tweetId: tweet.id
+          timestamp: Date.now(),
+          processed: false
         };
         
-        // Mark this tweet as processed
-        processedTweets.add(tweet.id);
+        // Store the tweet in our memory store
+        tweetStore.set(tweet.id, tweetData);
         
-        // Add to pending tweets
-        pendingTweets[tweet.id] = {
-          ...latestTweet,
-          timestamp: Date.now()
-        };
-        
-        // Break after finding the first valid tweet
-        break;
+        return tweetData;
+      } else if (tweet.id) {
+        if (processedTweetIds.has(tweet.id)) {
+          console.log(`Skipping already processed tweet ID: ${tweet.id}`);
+        }
       }
     }
     
-    if (!latestTweet) {
-      console.log(`No new tweets found mentioning "${keyword}"`);
-    }
-    
-    return latestTweet;
+    console.log(`No new tweets found mentioning "${SEARCH_KEYWORD}"`);
+    return null;
   } catch (error) {
     console.error('Error searching for tweets:', error);
     return null;
@@ -227,55 +238,94 @@ async function searchForLatestTweet(scraper, keyword) {
 }
 
 /**
- * Send a response to a tweet
+ * Process a tweet and respond with the AI-generated content
  * @param scraper Authenticated Twitter scraper
- * @param tweetId The tweet ID to respond to
- * @param response The response content
+ * @param tweet The tweet to process
  */
-async function respondToTweet(scraper, tweetId, response) {
+async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promise<void> {
   try {
-    // if (!pendingTweets[tweetId]) {
-    //   console.log(`Tweet ${tweetId} not found in pending tweets`);
-    //   return false;
-    // }
+    // Set as the current active tweet for API access
+    currentActiveTweet = tweet;
+    console.log(`Set tweet ${tweet.id} as current active tweet for agent.py to process`);
     
-    // Prepare quote text - truncate if too long for a tweet
-    const quoteText = response.substring(0, 240); // Twitter limit minus some room
+    // Wait for the agent.py to process the tweet and provide a response
+    const waitTimeMs = 120000; // 2 minutes (increased from 1 minute to give agent more time)
+    console.log(`Waiting up to ${waitTimeMs/1000} seconds for agent.py to provide a response...`);
     
-    // console.log(`Preparing to quote tweet @${pendingTweets[tweetId].username} with response`);
-    console.log(`Quote text: "${quoteText.substring(0, 50)}...for ${tweetId}"`);
+    // Set a timeout to check for response
+    await new Promise<void>((resolve) => {
+      const checkInterval = 5000; // Check every 5 seconds
+      let elapsedTime = 0;
+      
+      const intervalId = setInterval(() => {
+        elapsedTime += checkInterval;
+        
+        // Check if we have a response for this tweet
+        if (tweet.response) {
+          clearInterval(intervalId);
+          resolve();
+          return;
+        }
+        
+        // If we've waited long enough without a response, move on
+        if (elapsedTime >= waitTimeMs) {
+          clearInterval(intervalId);
+          console.log('No response received within the time limit');
+          resolve();
+        }
+      }, checkInterval);
+    });
     
-    // Send the quote tweet
-    await scraper.sendQuoteTweet(quoteText, tweetId);
-    console.log('Quote tweet sent successfully!');
+    // If we got a response, send the quote tweet
+    if (tweet.response) {
+      // Prepare quote text - truncate if too long for a tweet
+      const quoteText = tweet.response.substring(0, 240); // Twitter limit minus some room
+      
+      console.log(`Preparing to quote tweet @${tweet.username} with response`);
+      console.log(`Quote text: "${quoteText.substring(0, 50)}..."`);
+      
+      // Send the quote tweet
+      await scraper.sendQuoteTweet(quoteText, tweet.id);
+      console.log('Quote tweet sent successfully!');
+      
+      // Mark as processed
+      tweet.processed = true;
+      
+      // Add to processed tweets set
+      processedTweetIds.add(tweet.id);
+      saveProcessedTweets();
+      
+      // Refresh cookies after successful operation
+      await saveCookies(scraper);
+    } else {
+      console.log(`No response received for tweet ${tweet.id}, marking as processed to avoid repeat`);
+      // Still mark as processed to avoid repeated processing
+      processedTweetIds.add(tweet.id);
+      saveProcessedTweets();
+    }
     
-    // Store the response
-    botResponses[tweetId] = response;
-    
-    // Remove from pending
-    delete pendingTweets[tweetId];
-    
-    // Refresh cookies after successful operation
-    await saveCookies(scraper);
-    
-    return true;
+    // Clear the current active tweet regardless of outcome
+    if (currentActiveTweet?.id === tweet.id) {
+      currentActiveTweet = null;
+    }
   } catch (error) {
-    console.error('Error sending response tweet:', error);
-    return false;
+    console.error('Error processing tweet:', error);
+    
+    // Mark as processed even on error to avoid repeated failures
+    processedTweetIds.add(tweet.id);
+    saveProcessedTweets();
+    
+    // Clear the current active tweet on error
+    if (currentActiveTweet?.id === tweet.id) {
+      currentActiveTweet = null;
+    }
   }
 }
-
-// Create a scraper instance to use across the application
-let scraperInstance = null;
 
 /**
  * Initialize the Twitter client
  */
-async function initializeTwitterClient() {
-  if (scraperInstance) {
-    return scraperInstance;
-  }
-  
+async function initializeTwitterClient(): Promise<Scraper> {
   console.log('Initializing Twitter client...');
   
   // Create a new scraper instance
@@ -286,226 +336,150 @@ async function initializeTwitterClient() {
   
   // If cookie auth failed, try username/password
   if (!authenticated) {
+    // If the cookie file exists but authentication failed, delete it
+    if (fs.existsSync(COOKIES_FILE)) {
+      console.log('Removing invalid cookie file');
+      fs.unlinkSync(COOKIES_FILE);
+    }
+    
     authenticated = await loginWithCredentials(scraper);
   }
   
   if (!authenticated) {
-    throw new Error('Failed to authenticate with Twitter - check cookies.json file or provide credentials in .env');
+    throw new Error('Failed to authenticate with Twitter');
   }
   
-  scraperInstance = scraper;
   return scraper;
 }
 
-// Middleware to check if Twitter client is initialized
-async function ensureTwitterClient(c, next) {
-  if (!scraperInstance) {
-    try {
-      await initializeTwitterClient();
-    } catch (error) {
-      return c.json({ error: `Failed to initialize Twitter client: ${error.message}` }, 500);
-    }
+// Define API routes
+
+// GET endpoint to fetch the current active tweet that needs processing
+app.get('/api/current-tweet', (c) => {
+  if (!currentActiveTweet) {
+    return c.json({ status: 'no_active_tweet' }, 404);
   }
-  return next();
-}
-
-// API Routes
-app.get('/', (c) => {
-  return c.text('Twitter Bot API is running');
-});
-
-// Get status of the Twitter client
-app.get('/api/status', async (c) => {
-  try {
-    const isInitialized = !!scraperInstance;
-    let isLoggedIn = false;
-    let username = null;
-    
-    if (isInitialized) {
-      isLoggedIn = await scraperInstance.isLoggedIn() || false;
-      if (isLoggedIn) {
-        const me = await scraperInstance.me();
-        username = me?.username;
-      }
-    }
-    
-    // Check if cookies file exists
-    const cookiesFileExists = await fs.access(COOKIES_FILE_PATH)
-      .then(() => true)
-      .catch(() => false);
-    
-    return c.json({
-      status: 'ok',
-      isInitialized,
-      isLoggedIn,
-      username,
-      pendingTweets: Object.keys(pendingTweets).length,
-      processedTweets: processedTweets.size,
-      cookiesFileExists
-    });
-  } catch (error) {
-    return c.json({ error: 'Error fetching status' }, 500);
-  }
-});
-
-// Endpoint to initialize/refresh Twitter client
-app.post('/api/init', async (c) => {
-  try {
-    scraperInstance = null; // Force re-initialization
-    const scraper = await initializeTwitterClient();
-    const me = await scraper.me();
-    
-    return c.json({
-      success: true,
-      username: me?.username
-    });
-  } catch (error) {
-    console.error('Initialization error:', error);
-    return c.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-// Endpoint to search for tweets with keyword
-app.get('/api/search', ensureTwitterClient, async (c) => {
-  try {
-    const keyword = c.req.query('keyword') || '';
-    
-    if (!keyword) {
-      return c.json({ error: 'Keyword parameter is required' }, 400);
-    }
-    
-    const tweet = await searchForLatestTweet(scraperInstance, keyword);
-    
-    return c.json({
-      success: true,
-      tweet: tweet || null
-    });
-  } catch (error) {
-    console.error('Search error:', error);
-    return c.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
-  }
-});
-
-// Endpoint to get pending tweets
-app.get('/api/pending-tweets', ensureTwitterClient, (c) => {
+  
   return c.json({
-    success: true,
-    pendingTweets: Object.values(pendingTweets)
+    status: 'active',
+    tweet: {
+      id: currentActiveTweet.id,
+      username: currentActiveTweet.username,
+      content: currentActiveTweet.content
+    }
   });
 });
 
-// Endpoint to submit a response to a tweet
-app.post('/api/respond', ensureTwitterClient, async (c) => {
+// POST endpoint to receive AI-generated response
+app.post('/api/tweet-response', async (c) => {
   try {
     const body = await c.req.json();
-    const { tweetId, response } = await body;
     
-    if (!tweetId || !response) {
-      return c.json({ error: 'tweetId and response are required' }, 400);
+    // Validate request body
+    if (!body.tweetId || !body.response) {
+      return c.json({ status: 'error', message: 'Missing tweetId or response' }, 400);
     }
     
-    // if (!pendingTweets[tweetId]) {
-    //   return c.json({ error: 'Tweet not found in pending tweets' }, 404);
-    // }
+    const tweetId = body.tweetId;
+    const response = body.response;
     
-    const success = await respondToTweet(scraperInstance, tweetId, response);
+    // Check if the tweet exists in our store
+    const tweet = tweetStore.get(tweetId);
+    if (!tweet) {
+      return c.json({ status: 'error', message: 'Tweet not found' }, 404);
+    }
     
+    // Store the response
+    tweet.response = response;
+    console.log(`Received response for tweet ${tweetId}`);
     
-    return c.json({
-      success,
-      tweetId,
-      responded: success
-    });
+    return c.json({ status: 'success' });
   } catch (error) {
-    console.error('Response error:', error);
-    return c.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, 500);
+    console.error('Error processing response:', error);
+    return c.json({ status: 'error', message: 'Internal server error' }, 500);
   }
 });
 
-// Endpoint to get responses
-app.get('/api/responses', ensureTwitterClient, (c) => {
+// GET endpoint to check server status
+app.get('/api/status', (c) => {
   return c.json({
-    success: true,
-    responses: botResponses
+    status: 'online',
+    tweetCount: tweetStore.size,
+    processedTweetCount: processedTweetIds.size,
+    hasActiveTweet: currentActiveTweet !== null
   });
 });
 
-// Background task to search for tweets periodically
-async function startBackgroundTask(searchKeyword) {
-  console.log(`Starting background task to search for tweets with keyword: "${searchKeyword}"`);
+// GET endpoint to view processed tweets
+app.get('/api/tweets', (c) => {
+  const tweetsArray = Array.from(tweetStore.values()).map(tweet => ({
+    id: tweet.id,
+    username: tweet.username,
+    content: tweet.content.substring(0, 100) + (tweet.content.length > 100 ? '...' : ''),
+    timestamp: tweet.timestamp,
+    processed: tweet.processed || processedTweetIds.has(tweet.id),
+    hasResponse: !!tweet.response
+  }));
   
-  const runSearch = async () => {
-    try {
-      if (!scraperInstance) {
-        await initializeTwitterClient();
-      }
-      
-      await searchForLatestTweet(scraperInstance, searchKeyword);
-      
-      // Clean up old pending tweets (older than 30 minutes)
-      const now = Date.now();
-      Object.keys(pendingTweets).forEach(id => {
-        if (now - pendingTweets[id].timestamp > 30 * 60 * 1000) {
-          delete pendingTweets[id];
-        }
-      });
-      
-    } catch (error) {
-      console.error('Error in background search task:', error);
-    }
-    
-    // Schedule next run after 5 minutes
-    setTimeout(runSearch, 5 * 60 * 1000);
-  };
-  
-  // Start the first run
-  runSearch();
-}
+  return c.json({ tweets: tweetsArray });
+});
 
-// Main function
+/**
+ * Main function to run the Twitter bot
+ */
 async function main() {
   try {
-    // Initialize Twitter client on startup
-    await initializeTwitterClient();
+    // Load processed tweets from file
+    loadProcessedTweets();
     
-    // Get search keyword from environment variable or use default
-    const searchKeyword = process.env.SEARCH_KEYWORD || '';
+    // Initialize Twitter client
+    const scraper = await initializeTwitterClient();
     
-    // Start background task if keyword is provided
-    if (searchKeyword) {
-      startBackgroundTask(searchKeyword);
-    }
+    console.log('Twitter Bot initialized successfully');
+    console.log('Starting tweet processing cycle...');
     
-    // Start the server
-    console.log(`Starting server on port ${PORT}...`);
+    // Start the Hono server first so agent.py can connect
     serve({
       fetch: app.fetch,
-      port: Number(PORT)
+      port: PORT
     });
     
-    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log('API endpoints available for agent.py to connect');
+    
+    // Main processing loop
+    const runProcessingCycle = async () => {
+      try {
+        // Skip processing if we already have an active tweet
+        if (currentActiveTweet) {
+          console.log(`Already processing tweet ${currentActiveTweet.id}, waiting for agent.py to respond`);
+          return;
+        }
+        
+        // Find latest tweet
+        const latestTweet = await searchForLatestTweet(scraper);
+        
+        if (latestTweet) {
+          // Process the tweet and send response
+          await processTweetAndRespond(scraper, latestTweet);
+        } else {
+          console.log('No new tweets to process this cycle');
+        }
+      } catch (cycleError) {
+        console.error('Error in processing cycle:', cycleError);
+      } finally {
+        // Schedule next run after 5 minutes
+        setTimeout(runProcessingCycle, 5 * 60 * 1000);
+      }
+    };
+    
+    // Start the first cycle
+    runProcessingCycle();
+    
+    console.log('Bot is now running... Press Ctrl+C to stop');
   } catch (error) {
     console.error('Fatal error:', error);
-    // Don't exit process on initialization failure, allow manual retry via API
-    console.log('Server will continue running to allow initialization via API');
-    
-    // Start the server anyway
-    console.log(`Starting server on port ${PORT}...`);
-    serve({
-      fetch: app.fetch,
-      port: Number(PORT)
-    });
-    
-    console.log(`Server is running on http://localhost:${PORT}`);
+    process.exit(1);
   }
 }
 
