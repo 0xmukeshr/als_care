@@ -6,15 +6,23 @@ import * as path from 'path';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { fileURLToPath } from 'url';
+import OpenAI from 'openai'; // Import OpenAI
 
 // Load environment variables from .env file
 dotenv.config();
+
+let scraper=new Scraper();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configure server port
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 // Create Hono app
 const app = new Hono();
@@ -33,6 +41,7 @@ interface TweetData {
   timestamp: number;
   processed: boolean;
   response?: string;
+  refinedResponse?: string;
 }
 
 // In-memory storage
@@ -124,16 +133,37 @@ async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
       return false;
     }
     
-    // Verify if login was successful
-    const isLoggedIn = await scraper.isLoggedIn();
-    
-    if (isLoggedIn) {
-      console.log('Successfully authenticated with cookies');
-      const me = await scraper.me();
-      console.log(`Logged in as: @${me?.username}`);
-      return true;
-    } else {
-      console.log('Cookies are invalid or expired');
+    // Verify if login was successful with a timeout
+    try {
+      const timeoutPromise = new Promise<boolean>((_, reject) => {
+        setTimeout(() => reject(new Error('isLoggedIn check timed out after 15 seconds')), 15000);
+      });
+      
+      const loginCheckPromise = scraper.isLoggedIn();
+      const isLoggedIn = await Promise.race([loginCheckPromise, timeoutPromise]);
+      
+      if (isLoggedIn) {
+        console.log('Successfully authenticated with cookies');
+        try {
+          const meCheckPromise = scraper.me();
+          const meTimeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('User info check timed out')), 15000);
+          });
+          
+          const me = await Promise.race([meCheckPromise, meTimeoutPromise]);
+          if (me) {
+            console.log(`Logged in as: @${me.username}`);
+          }
+        } catch (profileError) {
+          console.log('Could not fetch user profile, but login appears successful');
+        }
+        return true;
+      } else {
+        console.log('Cookies are invalid or expired');
+        return false;
+      }
+    } catch (error) {
+      console.error('Error checking login status:', error);
       return false;
     }
   } catch (error) {
@@ -158,31 +188,81 @@ async function loginWithCredentials(scraper: Scraper): Promise<boolean> {
     throw new Error('Twitter credentials not found in environment variables');
   }
 
-  try {
-    console.log(`Logging in as ${username} with username/password...`);
-    // Pass email and 2FA secret if available
-    await scraper.login(username, password, email || undefined, twoFactorSecret || undefined);
-    
-    const isLoggedIn = await scraper.isLoggedIn();
-    if (!isLoggedIn) {
-      throw new Error('Failed to log in to Twitter with username/password');
+  const maxRetries = 3;
+  let retries = 0;
+  let lastError: any = null;
+
+  while (retries < maxRetries) {
+    try {
+      if (retries > 0) {
+        console.log(`Retry attempt ${retries}/${maxRetries} for login...`);
+        // Exponential backoff
+        const delay = Math.pow(2, retries) * 1000;
+        console.log(`Waiting ${delay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      
+      console.log(`Logging in as ${username} with username/password...`);
+      
+      // Configure a timeout for the login attempt
+      const loginPromise = scraper.login(username, password, email || undefined, twoFactorSecret || undefined);
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Login timed out after 30 seconds')), 30000);
+      });
+      
+      // Use Promise.race to implement a timeout
+      await Promise.race([loginPromise, timeoutPromise]);
+      
+      const isLoggedIn = await scraper.isLoggedIn();
+      if (!isLoggedIn) {
+        throw new Error('Failed to log in to Twitter with username/password');
+      }
+      
+      console.log('Successfully logged in with username/password');
+      const me = await scraper.me();
+      console.log(`Logged in as: @${me?.username}`);
+      
+      // Save new cookies for future use
+      await saveCookies(scraper);
+      
+      return true;
+    } catch (error) {
+      lastError = error;
+      console.error(`Authentication attempt ${retries + 1} failed:`, error);
+      
+      if (error instanceof Error) {
+        console.error(error.stack);
+        
+        // Check if this is a network error that might resolve with a retry
+        const errorMessage = error.message.toLowerCase();
+        const errorStack = error.stack?.toLowerCase() || '';
+        
+        if (
+          errorMessage.includes('etimedout') || 
+          errorMessage.includes('network') ||
+          errorMessage.includes('timeout') ||
+          errorStack.includes('etimedout') ||
+          errorStack.includes('fetch failed')
+        ) {
+          console.log('Network-related error detected, will retry');
+          retries++;
+          continue;
+        } else {
+          // Non-network error, no point in retrying
+          console.log('Non-network error, not retrying');
+          break;
+        }
+      }
+      
+      retries++;
     }
-    
-    console.log('Successfully logged in with username/password');
-    const me = await scraper.me();
-    console.log(`Logged in as: @${me?.username}`);
-    
-    // Save new cookies for future use
-    await saveCookies(scraper);
-    
-    return true;
-  } catch (error) {
-    console.error('Authentication failed:', error);
-    if (error instanceof Error) {
-      console.error(error.stack);
-    }
-    return false;
   }
+  
+  console.error(`Failed authentication after ${maxRetries} attempts`);
+  if (lastError) {
+    console.error('Last error:', lastError);
+  }
+  return false;
 }
 
 /**
@@ -199,8 +279,20 @@ async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null>
     
     console.log(`Starting search with mode: ${SearchMode.Latest} (${SearchMode[SearchMode.Latest]})`);
     
-    // Use fetchSearchTweets for more direct control
-    const response = await scraper.fetchSearchTweets(SEARCH_KEYWORD, maxTweets, SearchMode.Latest);
+    // Implement timeout for the search request
+    const searchPromise = scraper.fetchSearchTweets(SEARCH_KEYWORD, maxTweets, SearchMode.Latest);
+    const timeoutPromise = new Promise<any>((_, reject) => {
+      setTimeout(() => reject(new Error('Search request timed out after 45 seconds')), 45000);
+    });
+    
+    const response = await Promise.race([searchPromise, timeoutPromise]);
+    
+    if (!response || !response.tweets || !Array.isArray(response.tweets)) {
+      console.log('Invalid or empty response from search');
+      return null;
+    }
+    
+    console.log(`Retrieved ${response.tweets.length} tweets from search`);
     
     // Get the most recent tweet that contains our keyword and hasn't been processed
     for (const tweet of response.tweets) {
@@ -225,6 +317,8 @@ async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null>
       } else if (tweet.id) {
         if (processedTweetIds.has(tweet.id)) {
           console.log(`Skipping already processed tweet ID: ${tweet.id}`);
+        } else if (!tweet.text?.toLowerCase().includes(SEARCH_KEYWORD.toLowerCase())) {
+          console.log(`Tweet ${tweet.id} doesn't contain the keyword`);
         }
       }
     }
@@ -233,7 +327,69 @@ async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null>
     return null;
   } catch (error) {
     console.error('Error searching for tweets:', error);
+    if (error instanceof Error) {
+      console.error(error.stack);
+      
+      // Check if this is a network error
+      if (
+        error.message.includes('timeout') || 
+        error.message.includes('etimedout') ||
+        error.message.includes('network') ||
+        error.message.includes('fetch failed')
+      ) {
+        console.log('Network-related error during search, will retry in the next cycle');
+      }
+    }
     return null;
+  }
+}
+
+/**
+ * Process response text through OpenAI to optimize for Twitter
+ * @param responseText The original response text
+ * @param tweetContent The content of the original tweet
+ * @returns Optimized response text for Twitter
+ */
+async function optimizeForTwitter(responseText: string, tweetContent: string): Promise<string> {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      console.log('OpenAI API key not found, using original response');
+      return responseText;
+    }
+    
+    console.log('Processing response through OpenAI...');
+    
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful assistant that refines text to be perfect for Twitter. Optimize the text to be engaging, concise, and within Twitter's 280 character limit. Keep the core message but make it more conversational, impactful, and shareable. Add hashtags only if appropriate."
+        },
+        {
+          role: "user",
+          content: `Original tweet: "${tweetContent}"\n\nMy response to optimize for Twitter (make it brief, engaging, and under 280 characters): "${responseText}"`
+        }
+      ],
+      max_tokens: 150
+    });
+    
+    const optimizedResponse = completion.choices[0].message.content?.trim();
+    
+    if (!optimizedResponse) {
+      console.log('No optimized response received from OpenAI, using original');
+      return responseText;
+    }
+    
+    console.log('OpenAI optimized the response for Twitter');
+    
+    // Make sure it's under Twitter's limit (280 characters)
+    return optimizedResponse.substring(0, 280);
+    
+  } catch (error) {
+    console.error('Error optimizing response with OpenAI:', error);
+    // Fallback to original response if OpenAI processing fails
+    return responseText.substring(0, 280);
   }
 }
 
@@ -249,7 +405,7 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
     console.log(`Set tweet ${tweet.id} as current active tweet for agent.py to process`);
     
     // Wait for the agent.py to process the tweet and provide a response
-    const waitTimeMs = 120000; // 2 minutes (increased from 1 minute to give agent more time)
+    const waitTimeMs = 60000; // 1 minute
     console.log(`Waiting up to ${waitTimeMs/1000} seconds for agent.py to provide a response...`);
     
     // Set a timeout to check for response
@@ -278,14 +434,16 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
     
     // If we got a response, send the quote tweet
     if (tweet.response) {
-      // Prepare quote text - truncate if too long for a tweet
-      const quoteText = tweet.response.substring(0, 240); // Twitter limit minus some room
+      // Optimize the response for Twitter using OpenAI
+      const optimizedResponse = await optimizeForTwitter(tweet.response, tweet.content);
+      tweet.refinedResponse = optimizedResponse;
       
-      console.log(`Preparing to quote tweet @${tweet.username} with response`);
-      console.log(`Quote text: "${quoteText.substring(0, 50)}..."`);
+      console.log(`Preparing to quote tweet @${tweet.username} with optimized response`);
+      console.log(`Original: "${tweet.response.substring(0, 100)}..."`);
+      console.log(`Optimized: "${optimizedResponse}"`);
       
-      // Send the quote tweet
-      await scraper.sendQuoteTweet(quoteText, tweet.id);
+      // Send the quote tweet with optimized response
+      await scraper.sendQuoteTweet(optimizedResponse, tweet.id);
       console.log('Quote tweet sent successfully!');
       
       // Mark as processed
@@ -328,28 +486,82 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
 async function initializeTwitterClient(): Promise<Scraper> {
   console.log('Initializing Twitter client...');
   
-  // Create a new scraper instance
-  const scraper = new Scraper();
+  // Configure proxy if available
+  const proxyUrl = process.env.HTTP_PROXY || process.env.HTTPS_PROXY;
+  if (proxyUrl) {
+    console.log(`Using proxy: ${proxyUrl}`);
+    // Note: You may need to enhance the Scraper class to accept proxy settings
+    // This is a placeholder for potential proxy implementation
+  }
   
-  // First try to authenticate with cookies
-  let authenticated = await tryAuthWithCookies(scraper);
+  const maxRetries = 3;
+  let retryCount = 0;
   
-  // If cookie auth failed, try username/password
-  if (!authenticated) {
-    // If the cookie file exists but authentication failed, delete it
-    if (fs.existsSync(COOKIES_FILE)) {
-      console.log('Removing invalid cookie file');
-      fs.unlinkSync(COOKIES_FILE);
+  while (retryCount < maxRetries) {
+    try {
+      if (retryCount > 0) {
+        console.log(`Retry attempt ${retryCount}/${maxRetries} for Twitter client initialization...`);
+        await new Promise(resolve => setTimeout(resolve, retryCount * 2000)); // Increasing delay between retries
+      }
+      
+      // Create a new scraper instance
+      const scraper = new Scraper({
+        timeout: 30000, // 30 seconds timeout for network requests
+        retry: 2 // Built-in retry for individual requests
+      });
+      
+      // First try to authenticate with cookies
+      let authenticated = await tryAuthWithCookies(scraper);
+      
+      // If cookie auth failed, try username/password
+      if (!authenticated) {
+        // If the cookie file exists but authentication failed, delete it
+        if (fs.existsSync(COOKIES_FILE)) {
+          console.log('Removing invalid cookie file');
+          try {
+            fs.unlinkSync(COOKIES_FILE);
+          } catch (unlinkError) {
+            console.error('Error removing cookie file:', unlinkError);
+          }
+        }
+        
+        authenticated = await loginWithCredentials(scraper);
+      }
+      
+      if (!authenticated) {
+        throw new Error('Failed to authenticate with Twitter');
+      }
+      
+      console.log('Twitter client initialized successfully');
+      return scraper;
+    } catch (error) {
+      console.error(`Initialization attempt ${retryCount + 1} failed:`, error);
+      
+      // Check if this is a network-related error that might be resolved with a retry
+      const errorMessage = error instanceof Error ? error.message.toLowerCase() : '';
+      const errorStack = error instanceof Error ? (error.stack?.toLowerCase() || '') : '';
+      
+      const isNetworkError = 
+        errorMessage.includes('etimedout') || 
+        errorMessage.includes('network') ||
+        errorMessage.includes('fetch failed') ||
+        errorMessage.includes('timeout') ||
+        errorStack.includes('etimedout') ||
+        errorStack.includes('fetch failed');
+      
+      if (isNetworkError && retryCount < maxRetries - 1) {
+        console.log('Network error detected, will retry initialization');
+        retryCount++;
+      } else if (retryCount < maxRetries - 1) {
+        console.log('Will retry Twitter client initialization');
+        retryCount++;
+      } else {
+        throw new Error(`Failed to initialize Twitter client after ${maxRetries} attempts: ${errorMessage}`);
+      }
     }
-    
-    authenticated = await loginWithCredentials(scraper);
   }
   
-  if (!authenticated) {
-    throw new Error('Failed to authenticate with Twitter');
-  }
-  
-  return scraper;
+  throw new Error('Failed to initialize Twitter client after maximum retries');
 }
 
 // Define API routes
@@ -418,7 +630,8 @@ app.get('/api/tweets', (c) => {
     content: tweet.content.substring(0, 100) + (tweet.content.length > 100 ? '...' : ''),
     timestamp: tweet.timestamp,
     processed: tweet.processed || processedTweetIds.has(tweet.id),
-    hasResponse: !!tweet.response
+    hasResponse: !!tweet.response,
+    refinedResponse: tweet.refinedResponse || null
   }));
   
   return c.json({ tweets: tweetsArray });
@@ -429,23 +642,86 @@ app.get('/api/tweets', (c) => {
  */
 async function main() {
   try {
+    // Check if OpenAI API key is configured
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn('OPENAI_API_KEY not found in environment variables. Response optimization will be skipped.');
+    } else {
+      console.log('OpenAI integration ready for response optimization');
+    }
+    
+    // Check networking configuration
+    console.log('Checking network configuration...');
+    if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY) {
+      console.log(`Proxy detected: ${process.env.HTTP_PROXY || process.env.HTTPS_PROXY}`);
+    }
+    
+    try {
+      // Simple connectivity test - attempt a DNS lookup
+      const dns = await import('dns');
+      const startTime = Date.now();
+      await new Promise<void>((resolve, reject) => {
+        dns.lookup('twitter.com', (err) => {
+          if (err) {
+            console.error('Network connectivity issue detected!');
+            console.error('Could not resolve twitter.com:', err.message);
+            // Continue anyway, as the retry logic should handle this
+          } else {
+            const elapsed = Date.now() - startTime;
+            console.log(`Network connectivity test passed (${elapsed}ms to resolve twitter.com)`);
+          }
+          resolve();
+        });
+      });
+    } catch (netError) {
+      console.warn('Network configuration check failed:', netError);
+      // Continue anyway
+    }
+    
     // Load processed tweets from file
     loadProcessedTweets();
     
-    // Initialize Twitter client
-    const scraper = await initializeTwitterClient();
-    
-    console.log('Twitter Bot initialized successfully');
-    console.log('Starting tweet processing cycle...');
-    
     // Start the Hono server first so agent.py can connect
+    console.log(`Starting server on http://localhost:${PORT}`);
     serve({
       fetch: app.fetch,
       port: PORT
     });
-    
     console.log(`Server running on http://localhost:${PORT}`);
     console.log('API endpoints available for agent.py to connect');
+    
+    let scraper: Scraper | null = null;
+    let initializationSuccess = false;
+    const maxInitRetries = 5;
+    
+    // Try to initialize Twitter client with retries
+    for (let i = 0; i < maxInitRetries; i++) {
+      try {
+        console.log(`Twitter client initialization attempt ${i+1}/${maxInitRetries}`);
+        if (i > 0) {
+          // Wait for increasingly longer periods between retries
+          const delay = Math.pow(2, i) * 1000;
+          console.log(`Waiting ${delay/1000} seconds before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        // Initialize Twitter client
+        scraper = await initializeTwitterClient();
+        initializationSuccess = true;
+        console.log('Twitter Bot initialized successfully');
+        break;
+      } catch (initError) {
+        console.error(`Initialization attempt ${i+1} failed:`, initError);
+        if (i === maxInitRetries - 1) {
+          throw new Error(`Failed to initialize Twitter client after ${maxInitRetries} attempts`);
+        }
+      }
+    }
+    
+    if (!initializationSuccess || !scraper) {
+      throw new Error('Twitter client initialization failed');
+    }
+    
+    console.log('Starting tweet processing cycle...');
     
     // Main processing loop
     const runProcessingCycle = async () => {
@@ -456,8 +732,39 @@ async function main() {
           return;
         }
         
+        // Check if scraper is still authenticated
+        let isAuthenticated = false;
+        try {
+          isAuthenticated = await Promise.race([
+            scraper.isLoggedIn(),
+            new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error('Login check timed out')), 15000))
+          ]);
+        } catch (authCheckError) {
+          console.error('Error checking authentication status:', authCheckError);
+          isAuthenticated = false;
+        }
+        
+        // Re-authenticate if needed
+        if (!isAuthenticated) {
+          console.log('Twitter session expired, re-authenticating...');
+          try {
+            scraper = await initializeTwitterClient();
+          } catch (reAuthError) {
+            console.error('Re-authentication failed:', reAuthError);
+            // Skip this cycle, will try again next time
+            return;
+          }
+        }
+        
         // Find latest tweet
-        const latestTweet = await searchForLatestTweet(scraper);
+        let latestTweet = null;
+        try {
+          latestTweet = await searchForLatestTweet(scraper);
+        } catch (searchError) {
+          console.error('Error searching for tweets:', searchError);
+          // Skip processing this cycle
+          return;
+        }
         
         if (latestTweet) {
           // Process the tweet and send response
@@ -468,7 +775,7 @@ async function main() {
       } catch (cycleError) {
         console.error('Error in processing cycle:', cycleError);
       } finally {
-        // Schedule next run after 5 minutes
+        // Schedule next run after 3 minutes
         setTimeout(runProcessingCycle, 3 * 60 * 1000);
       }
     };
