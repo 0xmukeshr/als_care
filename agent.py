@@ -6,6 +6,7 @@ import json
 import time
 from datetime import datetime
 import logfire
+import aiohttp
 from supabase import Client
 from openai import AsyncOpenAI
 
@@ -28,6 +29,10 @@ from pydantic_ai_expert import pydantic_ai_expert, ALScareDeps
 from dotenv import load_dotenv
 load_dotenv()
 
+# API configuration
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
+POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", "10"))  # seconds
+
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 supabase: Client = Client(
     os.getenv("SUPABASE_URL"),
@@ -37,57 +42,66 @@ supabase: Client = Client(
 # Configure logfire to suppress warnings (optional)
 logfire.configure(send_to_logfire='never')
 
-# File paths
-INPUT_FILE = "input.json"
-OUTPUT_FILE = "output.json"
+class TweetInfo(TypedDict):
+    """Format of tweet information from API."""
+    id: str
+    username: str
+    content: str
+
 
 class ChatMessage(TypedDict):
-    """Format of messages in JSON files."""
+    """Format of messages in conversation history."""
     role: Literal['user', 'assistant', 'system']
     timestamp: str
     content: str
 
 
-def load_input() -> Optional[str]:
+async def fetch_current_tweet() -> Optional[TweetInfo]:
     """
-    Load user input from the input JSON file.
-    Returns None if the file doesn't exist or is empty.
+    Fetch the current tweet that needs processing from the API.
+    Returns None if there's no active tweet.
     """
     try:
-        with open(INPUT_FILE, 'r') as f:
-            data = json.load(f)
-            # Check for new input
-            if data.get("processed", True) is False:
-                return data.get("message", "")
-            return None
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Create default input file if it doesn't exist
-        with open(INPUT_FILE, 'w') as f:
-            json.dump({
-                "message": "",
-                "processed": True
-            }, f, indent=2)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{API_BASE_URL}/api/current-tweet") as response:
+                if response.status == 404:
+                    return None
+                
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("tweet")
+                
+                return None
+    except Exception as e:
+        print(f"Error fetching current tweet: {e}")
         return None
 
 
-def mark_input_as_processed():
-    """Mark the input as processed."""
+async def send_tweet_response(tweet_id: str, response: str) -> bool:
+    """
+    Send the AI-generated response back to the API.
+    Returns True if successful, False otherwise.
+    """
     try:
-        with open(INPUT_FILE, 'r') as f:
-            data = json.load(f)
-        
-        data["processed"] = True
-        
-        with open(INPUT_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-
-
-def save_output(messages: List[ChatMessage]):
-    """Save messages to output JSON file."""
-    with open(OUTPUT_FILE, 'w') as f:
-        json.dump({"messages": messages}, f, indent=2)
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "tweetId": tweet_id,
+                "response": response
+            }
+            
+            async with session.post(
+                f"{API_BASE_URL}/api/tweet-response", 
+                json=payload
+            ) as response:
+                
+                if response.status == 200:
+                    return True
+                else:
+                    print(f"API returned status code {response.status}")
+                    return False
+    except Exception as e:
+        print(f"Error sending tweet response: {e}")
+        return False
 
 
 def convert_message_to_chat_format(message) -> ChatMessage:
@@ -145,64 +159,59 @@ async def process_user_input(user_input: str, message_history: List[Any]):
 
 async def main_loop():
     """
-    Main loop that periodically checks for user input,
-    processes it, and saves the response.
+    Main loop that periodically checks for tweets to process,
+    processes them, and sends the response back to the API.
     """
-    # Initialize conversation history for the agent (not for output)
+    # Initialize conversation history for the agent
     message_history = []
     
-    print("ALS AI Agent started. Checking for input...")
+    print("ALS AI Tweet Agent started. Checking for tweets...")
     
     while True:
-        user_input = load_input()
-        
-        if user_input:
-            print(f"Received input: {user_input}")
+        try:
+            # Fetch current tweet that needs processing
+            tweet_info = await fetch_current_tweet()
             
-            # Create user message
-            user_message = ModelRequest(parts=[UserPromptPart(content=user_input)])
-            message_history.append(user_message)
-            
-            # Process input
-            new_messages, response_text = await process_user_input(user_input, message_history)
-            message_history.extend(new_messages)
-            
-            # Create fresh message array for output with just this exchange
-            current_exchange = [
-                {
-                    "role": "user",
-                    "timestamp": datetime.now().isoformat(),
-                    "content": user_input
-                },
-                {
-                    "role": "assistant",
-                    "timestamp": datetime.now().isoformat(),
-                    "content": response_text
-                }
-            ]
-            
-            # Save only the current exchange to output file (overwrites previous content)
-            save_output(current_exchange)
-            
-            # Mark input as processed
-            mark_input_as_processed()
-            
-            print(f"Response saved to {OUTPUT_FILE}")
-        
-        # Wait before checking again
-        await asyncio.sleep(1)
+            if tweet_info:
+                tweet_id = tweet_info["id"]
+                tweet_content = tweet_info["content"]
+                tweet_username = tweet_info["username"]
+                
+                print(f"Processing tweet from @{tweet_username}: {tweet_content[:50]}...")
+                
+                # Create user message
+                user_message = ModelRequest(parts=[UserPromptPart(content=tweet_content)])
+                message_history.append(user_message)
+                
+                # Process input
+                new_messages, response_text = await process_user_input(tweet_content, message_history)
+                message_history.extend(new_messages)
+                
+                # Send response back to the API
+                success = await send_tweet_response(tweet_id, response_text)
+                
+                if success:
+                    print(f"Response for tweet {tweet_id} sent successfully")
+                else:
+                    print(f"Failed to send response for tweet {tweet_id}")
+                
+                # Wait a bit longer after processing a tweet
+                await asyncio.sleep(POLLING_INTERVAL * 2)
+            else:
+                # No tweet to process, wait for the next polling interval
+                await asyncio.sleep(POLLING_INTERVAL)
+                
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            await asyncio.sleep(POLLING_INTERVAL)
 
 
 if __name__ == "__main__":
     try:
-        # Make sure output file exists
-        if not os.path.exists(OUTPUT_FILE):
-            save_output([])
-        
-        print(f"ALS AI Agent is running.")
-        print(f"To interact: Update {INPUT_FILE} with a new message and set 'processed' to false")
-        print(f"Responses will be saved to {OUTPUT_FILE}")
+        print(f"ALS AI Tweet Agent is running.")
+        print(f"API Base URL: {API_BASE_URL}")
+        print(f"Polling interval: {POLLING_INTERVAL} seconds")
         
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        print("\nShutting down ALS AI Agent...")
+        print("\nShutting down ALS AI Tweet Agent...")

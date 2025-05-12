@@ -23,7 +23,7 @@ const COOKIES_FILE = path.join(__dirname, 'twitter-cookies.json');
 const PROCESSED_TWEETS_FILE = path.join(__dirname, 'processed-tweets.json');
 
 // Keyword to search for
-const SEARCH_KEYWORD = '@0xkeyaru';
+const SEARCH_KEYWORD = '@alsassist_ai';
 
 // In-memory storage to replace file-based I/O
 interface TweetData {
@@ -469,7 +469,7 @@ async function main() {
         console.error('Error in processing cycle:', cycleError);
       } finally {
         // Schedule next run after 5 minutes
-        setTimeout(runProcessingCycle, 5 * 60 * 1000);
+        setTimeout(runProcessingCycle, 3 * 60 * 1000);
       }
     };
     
