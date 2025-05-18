@@ -25,7 +25,7 @@ An intelligent information crawler and RAG (Retrieval-Augmented Generation) agen
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+source venv/bin/activate
 ```
 
 2. Set up environment variables:

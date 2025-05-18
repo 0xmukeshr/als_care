@@ -216,4 +216,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nShutting down ALS AI Tweet Agent...")
 
-#hello world
