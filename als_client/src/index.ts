@@ -11,12 +11,12 @@ import OpenAI from 'openai';
 // Load environment variables
 dotenv.config();
 
+// Configure server port - FIXED: use a single PORT variable
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 4000;
+
 const scraper = new Scraper();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Configure server port
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -25,6 +25,14 @@ const openai = new OpenAI({
 
 // Create Hono app
 const app = new Hono();
+
+// Add a basic home route that returns a 200 status to help with health checks
+app.get('/', (c) => {
+  return c.text('Twitter Assistant Bot is running!', 200);
+});
+
+// Create Hono app
+
 
 const COOKIES_FILE = path.join(__dirname, 'twitter-cookies.json');
 const PROCESSED_TWEETS_FILE = path.join(__dirname, 'processed-tweets.json');

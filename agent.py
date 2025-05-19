@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # API configuration
-API_BASE_URL = os.getenv("API_BASE_URL", "https://als-care.onrender.com"    )
+API_BASE_URL = os.getenv("http://localhost:3000", "https://als-care.onrender.com")
 POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", "10"))  # seconds
 
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
