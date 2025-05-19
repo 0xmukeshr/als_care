@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # API configuration
-API_BASE_URL = os.getenv("API_BASE_URL")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
 POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", "10"))  # seconds
 
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))

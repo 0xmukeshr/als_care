@@ -2,10 +2,10 @@ from fastapi import FastAPI, BackgroundTasks
 import uvicorn
 import asyncio
 import os
-from agent import main_loop
+from  agent import main_loop
 
-# Get port from environment variable (critical for Render deployment)
-PORT = int(os.getenv("PORT", "10000"))
+# Set fixed port for Render deployment
+PORT = 10000
 
 app = FastAPI(title="ALS AI Tweet Agent")
 
@@ -39,8 +39,8 @@ async def startup_event():
     # Start the main loop in the background
     background_task = asyncio.create_task(main_loop())
     
-    print("ALS AI Tweet Agent started in background")
-    print(f"Service running on port {PORT}")
+    print(f"ALS AI Tweet Agent started in background")
+    print(f"Service running on fixed port {PORT}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -58,5 +58,5 @@ async def shutdown_event():
     print("ALS AI Tweet Agent stopped")
 
 if __name__ == "__main__":
-    # Start the FastAPI app
+    # Start the FastAPI app with fixed port
     uvicorn.run("api:app", host="0.0.0.0", port=PORT, reload=False)
