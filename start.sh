@@ -1,24 +1,25 @@
 #!/bin/bash
+set -e  # Exit on error
 
-# Exit on any error
-set -e
+# Create a Python virtual environment
+python3 -m venv venv
 
-# 1. Python environment setup
-echo "Installing Python dependencies..."
+# Activate the virtual environment
+source venv/bin/activate
+
+# Install Python dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# 2. Node.js environment setup (inside als_client)
-echo "Installing Node dependencies..."
+# Go to als_client and install Node dependencies
 cd als_client
 npm install
 
-# 3. Run both services
-echo "Starting both services..."
-
-# Start Python backend (adjust path if needed)
+# Run Python backend in background
 cd ..
+source venv/bin/activate  # Just to be safe
 python3 agent.py &
 
-# Start Node frontend/client (from als_client)
+# Start Node app
 cd als_client
 npm run dev
