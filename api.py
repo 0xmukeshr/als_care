@@ -4,6 +4,9 @@ import asyncio
 import os
 from agent import main_loop
 
+# Get port from environment variable (critical for Render deployment)
+PORT = int(os.getenv("PORT", "8000"))
+
 app = FastAPI(title="ALS AI Tweet Agent")
 
 # Global variable to track the background task
@@ -37,6 +40,7 @@ async def startup_event():
     background_task = asyncio.create_task(main_loop())
     
     print("ALS AI Tweet Agent started in background")
+    print(f"Service running on port {PORT}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -54,8 +58,5 @@ async def shutdown_event():
     print("ALS AI Tweet Agent stopped")
 
 if __name__ == "__main__":
-    # Get port from environment variable or use default 8000
-    port = int(os.getenv("PORT", "8000"))
-    
     # Start the FastAPI app
-    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("api:app", host="0.0.0.0", port=PORT, reload=False)
