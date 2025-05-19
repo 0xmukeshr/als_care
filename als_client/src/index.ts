@@ -242,7 +242,7 @@ async function loginWithCredentials(scraper: Scraper): Promise<boolean> {
 async function getBotUsername(scraper: Scraper): Promise<string | null> {
   try {
     const me = await scraper.me();
-    if (me && typeof me === 'object' && 'username' in me) {
+    if (me && typeof me === 'object' && 'username' in me && me.username) {
       return me.username.toLowerCase();
     }
     return null;
@@ -251,7 +251,6 @@ async function getBotUsername(scraper: Scraper): Promise<string | null> {
     return process.env.TWITTER_USERNAME?.toLowerCase() || null;
   }
 }
-
 /**
  * Search for the latest tweet with specific keyword, excluding the bot's own tweets
  */
@@ -436,9 +435,9 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
       
       // Attempt to create a new conversation
       try {
-        const newConversation = await scraper.createDirectMessageConversation(username);
-        if (newConversation && newConversation.conversationId) {
-          conversationId = newConversation.conversationId;
+        const newConversation = await scraper.getDirectMessageConversations(username);
+        if (newConversation && newConversation.conversations?.[0]?.conversationId) {
+          conversationId = newConversation.conversations[0].conversationId;
           console.log(`Created new conversation with @${username}, ID: ${conversationId}`);
         } else {
           console.log(`Failed to create new conversation with @${username}`);
@@ -471,7 +470,6 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
     return false;
   }
 }
-
 /**
  * Process a tweet and respond with the AI-generated content
  */
@@ -578,10 +576,7 @@ async function initializeTwitterClient(): Promise<Scraper> {
         await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
       }
       
-      const scraper = new Scraper({
-        timeout: 30000,
-        retry: 2
-      });
+      const scraper = new Scraper();
       
       // First try to authenticate with cookies
       let authenticated = await tryAuthWithCookies(scraper);

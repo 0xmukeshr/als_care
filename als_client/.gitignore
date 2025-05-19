@@ -26,3 +26,6 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+processed-tweets.json
+twitter-cookies.json
