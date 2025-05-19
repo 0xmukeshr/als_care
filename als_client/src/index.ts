@@ -337,11 +337,11 @@ async function generateUniqueQuote(tweetContent: string, responseText: string): 
       messages: [
         {
           role: "system",
-          content: "You are a compassionate caregiving specialist on Twitter. Create a unique, supportive quote that shows empathy and understanding of the given tweet content. The quote should be warm, nurturing, and reassuring - like a caring professional would respond. Focus on support, empathy, and gentle guidance. Keep it under 250 characters to leave room for additional content in a tweet."
+          content: "You are a compassionate caregiving specialist on Twitter. Create a unique, supportive quote that shows empathy and understanding of the given tweet content. The quote should be warm, nurturing, and reassuring - like a caring professional would respond. Focus on support, empathy, and gentle guidance. Keep it under 200 characters to leave room for additional content in a tweet."
         },
         {
           role: "user",
-          content: `Original tweet: "${tweetContent}"\n\nGenerate a unique, empathetic caregiving quote for my reply that shows genuine understanding and support (keep under 250 characters):`
+          content: `Original tweet: "${tweetContent}"\n\nGenerate a unique, empathetic caregiving quote for my reply that shows genuine understanding and support (keep under 200 characters):make it short with hastags`
         }
       ],
       max_tokens: 150
@@ -380,11 +380,11 @@ async function optimizeForTwitter(responseText: string, tweetContent: string): P
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that refines text to be perfect for Twitter. Optimize the text to be engaging, concise, and within Twitter's 280 character limit. Keep the core message but make it more conversational, impactful, and shareable. Add hashtags only if appropriate."
+          content: "You are a helpful assistant that refines text to be perfect for Twitter. Optimize the text to be engaging, concise, and within Twitter's 250 character limit. Keep the core message but make it more conversational, impactful, and shareable. Add hashtags only if appropriate."
         },
         {
           role: "user",
-          content: `Original tweet: "${tweetContent}"\n\nMy response to optimize for Twitter (make it brief, engaging, and under 280 characters): "${responseText}"`
+          content: `Original tweet: "${tweetContent}"\n\nMy response to optimize for Twitter (make it brief, engaging, and under 250 characters): "${responseText}"`
         }
       ],
       max_tokens: 150
@@ -398,11 +398,11 @@ async function optimizeForTwitter(responseText: string, tweetContent: string): P
     }
     
     console.log('OpenAI optimized the response for Twitter');
-    return optimizedResponse.substring(0, 280);
+    return optimizedResponse.substring(0, 250);
     
   } catch (error) {
     console.error('Error optimizing response with OpenAI:', error);
-    return responseText.substring(0, 280);
+    return responseText.substring(0, 250);
   }
 }
 
