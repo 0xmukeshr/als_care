@@ -5,7 +5,7 @@ set -e
 
 # 1. Python environment setup
 echo "Installing Python dependencies..."
-pip install -r requirements.txt
+pipx install -r requirements.txt
 
 # 2. Node.js environment setup (inside als_client)
 echo "Installing Node dependencies..."
