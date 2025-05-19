@@ -1,0 +1,11 @@
+{
+  "name": "twitter-assistant-app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "bash start.sh",
+    "postinstall": "cd als_client && npm install"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

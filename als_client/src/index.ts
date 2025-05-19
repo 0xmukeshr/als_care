@@ -31,8 +31,6 @@ app.get('/', (c) => {
   return c.text('Twitter Assistant Bot is running!', 200);
 });
 
-// Create Hono app
-
 
 const COOKIES_FILE = path.join(__dirname, 'twitter-cookies.json');
 const PROCESSED_TWEETS_FILE = path.join(__dirname, 'processed-tweets.json');
