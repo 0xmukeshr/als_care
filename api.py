@@ -5,7 +5,7 @@ import os
 from agent import main_loop
 
 # Get port from environment variable (critical for Render deployment)
-PORT = int(os.getenv("PORT", "8000"))
+PORT = int(os.getenv("PORT", "10000"))
 
 app = FastAPI(title="ALS AI Tweet Agent")
 

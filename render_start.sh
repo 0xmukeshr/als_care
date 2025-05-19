@@ -3,7 +3,7 @@
 # This script explicitly binds to the port and ensures the service starts properly on Render
 
 # Get the PORT environment variable, defaulting to 8000 if not set
-PORT="${PORT:-8000}"
+PORT="${PORT:-10000}"
 
 # Print information for debugging
 echo "Starting service on port: $PORT"
