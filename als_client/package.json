@@ -8,10 +8,11 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
+    "@types/node-fetch": "^2.6.2",
     "agent-twitter-client": "^0.0.18",
     "dotenv": "^16.5.0",
     "hono": "^4.7.9",
-    "openai": "^4.98.0",
+    "openai": "^4.100.0",
     "tough-cookie": "^5.1.2",
     "twitter-api-v2": "^1.23.2"
   },

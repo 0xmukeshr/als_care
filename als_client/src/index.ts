@@ -458,7 +458,7 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
     console.log(`Sending DM to @${username} with conversation ID: ${conversationId}`);
     const response = await scraper.sendDirectMessage(conversationId, messageText);
     
-    if (response && response.dm) {
+    if (response) {
       console.log(`Successfully sent DM to @${username}`);
       return true;
     } else {
@@ -469,8 +469,8 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
     console.error(`Error sending DM to @${username}:`, error);
     return false;
   }
-}
-/**
+
+}/**
  * Process a tweet and respond with the AI-generated content
  */
 async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promise<void> {
