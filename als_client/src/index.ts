@@ -8,31 +8,25 @@ import { serve } from '@hono/node-server';
 import { fileURLToPath } from 'url';
 import OpenAI from 'openai';
 
-// Load environment variables
 dotenv.config();
 
 const scraper = new Scraper();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Configure server port
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
-// Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Create Hono app
 const app = new Hono();
 
 const COOKIES_FILE = path.join(__dirname, 'twitter-cookies.json');
 const PROCESSED_TWEETS_FILE = path.join(__dirname, 'processed-tweets.json');
 
-// Keyword to search for
 const SEARCH_KEYWORD = '@alsassist_ai';
 
-// In-memory storage
 interface TweetData {
   id: string;
   username: string;
@@ -48,9 +42,6 @@ const tweetStore: Map<string, TweetData> = new Map();
 let currentActiveTweet: TweetData | null = null;
 const processedTweetIds: Set<string> = new Set();
 
-/**
- * Load processed tweet IDs from file
- */
 function loadProcessedTweets(): void {
   try {
     if (fs.existsSync(PROCESSED_TWEETS_FILE)) {
@@ -67,9 +58,6 @@ function loadProcessedTweets(): void {
   }
 }
 
-/**
- * Save processed tweet IDs to file
- */
 function saveProcessedTweets(): void {
   try {
     const ids = Array.from(processedTweetIds);
@@ -80,9 +68,6 @@ function saveProcessedTweets(): void {
   }
 }
 
-/**
- * Save Twitter cookies to a file
- */
 async function saveCookies(scraper: Scraper): Promise<void> {
   try {
     const cookies = await scraper.getCookies();
@@ -94,9 +79,6 @@ async function saveCookies(scraper: Scraper): Promise<void> {
   }
 }
 
-/**
- * Try to authenticate with saved cookies
- */
 async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
   try {
     if (!fs.existsSync(COOKIES_FILE)) {
@@ -114,7 +96,6 @@ async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
     
     console.log('Attempting to authenticate with saved cookies...');
     
-    // Convert JSON objects back to Cookie objects
     try {
       const cookies = cookiesJson.map(cookieJson => Cookie.fromJSON(cookieJson)).filter((cookie): cookie is Cookie => cookie !== null);
       await scraper.setCookies(cookies);
@@ -123,7 +104,6 @@ async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
       return false;
     }
     
-    // Verify if login was successful with a timeout
     try {
       const timeoutPromise = new Promise<boolean>((_, reject) => {
         setTimeout(() => reject(new Error('isLoggedIn check timed out after 15 seconds')), 15000);
@@ -160,9 +140,6 @@ async function tryAuthWithCookies(scraper: Scraper): Promise<boolean> {
   }
 }
 
-/**
- * Authenticate with Twitter using username/password
- */
 async function loginWithCredentials(scraper: Scraper): Promise<boolean> {
   const username = process.env.TWITTER_USERNAME;
   const password = process.env.TWITTER_PASSWORD;
@@ -236,9 +213,6 @@ async function loginWithCredentials(scraper: Scraper): Promise<boolean> {
   return false;
 }
 
-/**
- * Get current bot's username
- */
 async function getBotUsername(scraper: Scraper): Promise<string | null> {
   try {
     const me = await scraper.me();
@@ -251,18 +225,15 @@ async function getBotUsername(scraper: Scraper): Promise<string | null> {
     return process.env.TWITTER_USERNAME?.toLowerCase() || null;
   }
 }
-/**
- * Search for the latest tweet with specific keyword, excluding the bot's own tweets
- */
+
 async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null> {
   try {
     console.log(`Searching for tweets containing "${SEARCH_KEYWORD}"...`);
     
-    // Get the bot's username to filter out self-mentions
     const botUsername = await getBotUsername(scraper);
     console.log(`Bot username identified as: ${botUsername || 'unknown'}`);
     
-    const maxTweets = 20; // Increase the number to have more tweets to filter through
+    const maxTweets = 20;
     const searchPromise = scraper.fetchSearchTweets(SEARCH_KEYWORD, maxTweets, SearchMode.Latest);
     const timeoutPromise = new Promise<any>((_, reject) => {
       setTimeout(() => reject(new Error('Search request timed out after 45 seconds')), 45000);
@@ -282,13 +253,11 @@ async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null>
         continue;
       }
       
-      // Skip if this is our own tweet
       if (botUsername && tweet.username.toLowerCase() === botUsername) {
         console.log(`Skipping our own tweet from @${tweet.username}`);
         continue;
       }
       
-      // Check if the tweet contains our keyword and hasn't been processed yet
       if (tweet.text.toLowerCase().includes(SEARCH_KEYWORD.toLowerCase()) && !processedTweetIds.has(tweet.id)) {
         console.log(`Found new tweet by @${tweet.username}: "${tweet.text?.substring(0, 50)}..."`);
         
@@ -320,52 +289,6 @@ async function searchForLatestTweet(scraper: Scraper): Promise<TweetData | null>
   }
 }
 
-/**
- * Generate a unique quote for the tweet response with a caregiving tone
- */
-async function generateUniqueQuote(tweetContent: string, responseText: string): Promise<string> {
-  try {
-    if (!process.env.OPENAI_API_KEY) {
-      console.log('OpenAI API key not found, generating simple caregiving quote');
-      return `We're here to support you: ${tweetContent.substring(0, 50)}...`;
-    }
-    
-    console.log('Generating unique caregiving quote through OpenAI...');
-    
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You are a compassionate caregiving specialist on Twitter. Create a unique, supportive quote that shows empathy and understanding of the given tweet content. The quote should be warm, nurturing, and reassuring - like a caring professional would respond. Focus on support, empathy, and gentle guidance. Keep it under 200 characters to leave room for additional content in a tweet."
-        },
-        {
-          role: "user",
-          content: `Original tweet: "${tweetContent}"\n\nGenerate a unique, empathetic caregiving quote for my reply that shows genuine understanding and support (keep under 200 characters):make it short with hastags`
-        }
-      ],
-      max_tokens: 150
-    });
-    
-    const quote = completion.choices[0].message.content?.trim();
-    
-    if (!quote) {
-      console.log('No quote received from OpenAI, using default caregiving response');
-      return `We understand your needs and are here to support you. Regarding: ${tweetContent.substring(0, 50)}...`;
-    }
-    
-    console.log('Generated unique caregiving quote:', quote);
-    return quote.substring(0, 250); // Updated to 250 characters as requested
-    
-  } catch (error) {
-    console.error('Error generating unique caregiving quote with OpenAI:', error);
-    return `We're here to care for you and support your journey. Regarding: ${tweetContent.substring(0, 50)}...`;
-  }
-}
-
-/**
- * Process response text through OpenAI to optimize for Twitter
- */
 async function optimizeForTwitter(responseText: string, tweetContent: string): Promise<string> {
   try {
     if (!process.env.OPENAI_API_KEY) {
@@ -384,10 +307,10 @@ async function optimizeForTwitter(responseText: string, tweetContent: string): P
         },
         {
           role: "user",
-          content: `Original tweet: "${tweetContent}"\n\nMy response to optimize for Twitter (make it brief, engaging, and under 250 characters): "${responseText}"`
+          content: `My response to optimize for Twitter (make it brief, engaging, and under 230 characters): "${responseText}"`
         }
       ],
-      max_tokens: 150
+      max_tokens: 230
     });
     
     const optimizedResponse = completion.choices[0].message.content?.trim();
@@ -406,14 +329,10 @@ async function optimizeForTwitter(responseText: string, tweetContent: string): P
   }
 }
 
-/**
- * Send a direct message to a user
- */
 async function sendDirectMessage(scraper: Scraper, username: string, messageText: string): Promise<boolean> {
   try {
     console.log(`Preparing to send DM to user @${username}`);
     
-    // First get the user conversations
     const conversations = await scraper.getDirectMessageConversations(username);
     
     if (!conversations || !conversations.conversations) {
@@ -421,7 +340,6 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
       return false;
     }
     
-    // Find the conversation ID for this user
     let conversationId: string | null = null;
     for (const entry of conversations.conversations) {
       if (entry.participants && entry.participants.some(p => p.screenName.toLowerCase() === username.toLowerCase())) {        
@@ -433,7 +351,6 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
     if (!conversationId) {
       console.log(`No existing conversation found with @${username}, trying to create a new one`);
       
-      // Attempt to create a new conversation
       try {
         const newConversation = await scraper.getDirectMessageConversations(username);
         if (newConversation && newConversation.conversations?.[0]?.conversationId) {
@@ -454,7 +371,6 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
       return false;
     }
     
-    // Send the direct message
     console.log(`Sending DM to @${username} with conversation ID: ${conversationId}`);
     const response = await scraper.sendDirectMessage(conversationId, messageText);
     
@@ -469,20 +385,18 @@ async function sendDirectMessage(scraper: Scraper, username: string, messageText
     console.error(`Error sending DM to @${username}:`, error);
     return false;
   }
+}
 
-}/**
- * Process a tweet and respond with the AI-generated content
- */
 async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promise<void> {
   try {
     currentActiveTweet = tweet;
     console.log(`Set tweet ${tweet.id} as current active tweet for agent.py to process`);
     
-    const waitTimeMs = 60000; // 1 minute
+    const waitTimeMs = 60000;
     console.log(`Waiting up to ${waitTimeMs/1000} seconds for agent.py to provide a response...`);
     
     await new Promise<void>((resolve) => {
-      const checkInterval = 5000; // Check every 5 seconds
+      const checkInterval = 5000;
       let elapsedTime = 0;
       
       const intervalId = setInterval(() => {
@@ -503,7 +417,6 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
     });
     
     if (tweet.response) {
-      // Optimize the response for Twitter
       const optimizedResponse = await optimizeForTwitter(tweet.response, tweet.content);
       tweet.refinedResponse = optimizedResponse;
       
@@ -511,7 +424,6 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
       console.log(`Original: "${tweet.response.substring(0, 100)}..."`);
       console.log(`Optimized: "${optimizedResponse}"`);
       
-      // First send as a direct message
       const dmSent = await sendDirectMessage(scraper, tweet.username, 
         `Hi there! Here's my response to your tweet that mentioned ${SEARCH_KEYWORD}:\n\n${tweet.response}\n\nI'll also post a shorter version as a public reply.`);
       
@@ -522,22 +434,15 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
         console.log(`Could not send DM to @${tweet.username}, proceeding with public reply only`);
       }
       
-      // Generate a unique quote for the retweet
-      const uniqueQuote = await generateUniqueQuote(tweet.content, tweet.response);
+      const quoteTweetContent = `${optimizedResponse}`;
       
-      // Add the optimized response and create the full quote tweet content
-      const quoteTweetContent = `${uniqueQuote}\n\n${optimizedResponse}`;
-      
-      // Then send the public quote tweet
       await scraper.sendQuoteTweet(quoteTweetContent.substring(0, 280), tweet.id);
       console.log('Quote tweet sent successfully!');
       
-      // Mark as processed
       tweet.processed = true;
       processedTweetIds.add(tweet.id);
       saveProcessedTweets();
       
-      // Refresh cookies after successful operation
       await saveCookies(scraper);
     } else {
       console.log(`No response received for tweet ${tweet.id}, marking as processed to avoid repeat`);
@@ -545,7 +450,6 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
       saveProcessedTweets();
     }
     
-    // Clear the current active tweet
     if (currentActiveTweet?.id === tweet.id) {
       currentActiveTweet = null;
     }
@@ -560,9 +464,6 @@ async function processTweetAndRespond(scraper: Scraper, tweet: TweetData): Promi
   }
 }
 
-/**
- * Initialize the Twitter client
- */
 async function initializeTwitterClient(): Promise<Scraper> {
   console.log('Initializing Twitter client...');
   
@@ -578,10 +479,8 @@ async function initializeTwitterClient(): Promise<Scraper> {
       
       const scraper = new Scraper();
       
-      // First try to authenticate with cookies
       let authenticated = await tryAuthWithCookies(scraper);
       
-      // If cookie auth failed, try username/password
       if (!authenticated) {
         if (fs.existsSync(COOKIES_FILE)) {
           console.log('Removing invalid cookie file');
@@ -632,9 +531,6 @@ async function initializeTwitterClient(): Promise<Scraper> {
   throw new Error('Failed to initialize Twitter client after maximum retries');
 }
 
-// Define API routes
-
-// GET endpoint to fetch the current active tweet that needs processing
 app.get('/api/current-tweet', (c) => {
   if (!currentActiveTweet) {
     return c.json({ status: 'no_active_tweet' }, 404);
@@ -650,7 +546,6 @@ app.get('/api/current-tweet', (c) => {
   });
 });
 
-// POST endpoint to receive AI-generated response
 app.post('/api/tweet-response', async (c) => {
   try {
     const body = await c.req.json();
@@ -677,7 +572,6 @@ app.post('/api/tweet-response', async (c) => {
   }
 });
 
-// GET endpoint to check server status
 app.get('/api/status', (c) => {
   return c.json({
     status: 'online',
@@ -687,7 +581,6 @@ app.get('/api/status', (c) => {
   });
 });
 
-// GET endpoint to view processed tweets
 app.get('/api/tweets', (c) => {
   const tweetsArray = Array.from(tweetStore.values()).map(tweet => ({
     id: tweet.id,
@@ -703,22 +596,16 @@ app.get('/api/tweets', (c) => {
   return c.json({ tweets: tweetsArray });
 });
 
-/**
- * Main function to run the Twitter bot
- */
 async function main() {
   try {
-    // Check if OpenAI API key is configured
     if (!process.env.OPENAI_API_KEY) {
       console.warn('OPENAI_API_KEY not found in environment variables. Response optimization will be skipped.');
     } else {
       console.log('OpenAI integration ready for response optimization');
     }
     
-    // Load processed tweets from file
     loadProcessedTweets();
     
-    // Start the Hono server
     console.log(`Starting server on http://localhost:${PORT}`);
     serve({
       fetch: app.fetch,
@@ -729,7 +616,6 @@ async function main() {
     let scraper: Scraper | null = null;
     const maxInitRetries = 5;
     
-    // Try to initialize Twitter client with retries
     for (let i = 0; i < maxInitRetries; i++) {
       try {
         console.log(`Twitter client initialization attempt ${i+1}/${maxInitRetries}`);
@@ -755,16 +641,13 @@ async function main() {
     
     console.log('Starting tweet processing cycle...');
     
-    // Main processing loop
     const runProcessingCycle = async () => {
       try {
-        // Skip processing if we already have an active tweet
         if (currentActiveTweet) {
           console.log(`Already processing tweet ${currentActiveTweet.id}, waiting for agent.py to respond`);
           return;
         }
         
-        // Check if scraper is still authenticated
         let isAuthenticated = false;
         try {
           isAuthenticated = await Promise.race([
@@ -776,7 +659,6 @@ async function main() {
           isAuthenticated = false;
         }
         
-        // Re-authenticate if needed
         if (!isAuthenticated) {
           console.log('Twitter session expired, re-authenticating...');
           try {
@@ -787,7 +669,6 @@ async function main() {
           }
         }
         
-        // Find latest tweet
         const latestTweet = await searchForLatestTweet(scraper!);
         
         if (latestTweet) {
@@ -798,12 +679,10 @@ async function main() {
       } catch (cycleError) {
         console.error('Error in processing cycle:', cycleError);
       } finally {
-        // Schedule next run after 3 minutes
         setTimeout(runProcessingCycle, 3 * 60 * 1000);
       }
     };
     
-    // Start the first cycle
     runProcessingCycle();
     
     console.log('Bot is now running... Press Ctrl+C to stop');
@@ -813,5 +692,4 @@ async function main() {
   }
 }
 
-// Run the main function
 main();
